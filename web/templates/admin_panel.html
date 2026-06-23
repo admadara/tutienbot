@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Panel — Tu Tiên Bot</title>
+<style>
+  :root {
+    --bg: #0a0a0f; --bg2: #12121a; --bg3: #1a1a2e;
+    --gold: #FFD700; --gold2: #FFA500;
+    --text: #e8e8f0; --text2: #9090a0;
+    --border: #2a2a40; --radius: 12px;
+    --green: #4CAF50; --red: #F44336; --orange: #FF9800;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; }
+
+  nav {
+    background: var(--bg2); border-bottom: 1px solid var(--border);
+    padding: 12px 20px; display: flex; align-items: center; gap: 16px;
+    position: sticky; top: 0; z-index: 100;
+  }
+  .nav-logo { color: var(--gold); font-weight: 700; font-size: 1.1rem; text-decoration: none; }
+  .nav-badge {
+    background: rgba(255,100,100,0.15); color: #ff9898;
+    border: 1px solid rgba(255,100,100,0.3);
+    border-radius: 20px; padding: 2px 10px; font-size: 0.75rem; font-weight: 600;
+  }
+  .nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .nav-user { color: var(--text2); font-size: 0.85rem; }
+  .btn-logout {
+    color: var(--text2); text-decoration: none; font-size: 0.8rem;
+    padding: 5px 12px; border: 1px solid var(--border); border-radius: 6px;
+    transition: all 0.2s;
+  }
+  .btn-logout:hover { border-color: #ff6b6b; color: #ff6b6b; }
+
+  main { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+
+  /* STATUS BAR */
+  .status-bar {
+    display: flex; align-items: center; gap: 16px;
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px 20px; margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .status-dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--red); flex-shrink: 0;
+    box-shadow: 0 0 8px var(--red);
+  }
+  .status-dot.running { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+  .status-label { font-weight: 600; font-size: 1rem; }
+  .status-label.running { color: var(--green); }
+  .status-label.stopped { color: var(--red); }
+  .btn-group { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  .btn {
+    padding: 8px 18px; border-radius: 8px; border: none;
+    font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: opacity 0.2s;
+  }
+  .btn:hover { opacity: 0.8; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-start { background: var(--green); color: #fff; }
+  .btn-stop  { background: var(--red);   color: #fff; }
+  .btn-restart { background: var(--orange); color: #fff; }
+  .btn-refresh { background: var(--bg3); color: var(--text2); border: 1px solid var(--border); }
+
+  /* STATS */
+  .stat-row { display: grid; grid-template-columns: repeat(auto-fill,minmax(180px,1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat-card {
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; text-align: center;
+  }
+  .stat-card .val { font-size: 1.8rem; font-weight: 700; color: var(--gold); }
+  .stat-card .lbl { font-size: 0.75rem; color: var(--text2); margin-top: 4px; }
+
+  /* GRID */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media(max-width:700px) { .grid2 { grid-template-columns: 1fr; } }
+
+  /* CARD */
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .card-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text2); margin-bottom: 12px; }
+
+  /* LOG */
+  .log-box {
+    background: #050508; border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; font-family: monospace; font-size: 0.72rem; color: #a0e0a0;
+    height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+  }
+
+  /* PLAYERS TABLE */
+  .p-table { width: 100%; border-collapse: collapse; }
+  .p-table th { font-size: 0.7rem; color: var(--text2); text-transform: uppercase; padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+  .p-table td { padding: 8px; border-bottom: 1px solid rgba(42,42,64,0.4); font-size: 0.82rem; }
+  .p-table tr:hover td { background: rgba(255,215,0,0.03); }
+  .status-pill {
+    display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 0.7rem; font-weight: 600;
+  }
+  .status-idle { background: rgba(144,144,160,0.15); color: #9090a0; }
+  .status-cultivating { background: rgba(76,175,80,0.15); color: #4CAF50; }
+  .status-exploring { background: rgba(33,150,243,0.15); color: #2196F3; }
+
+  /* TOAST */
+  #toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--bg2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 20px; font-size: 0.85rem;
+    opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999;
+    max-width: 280px;
+  }
+  #toast.show { opacity: 1; }
+  #toast.ok  { border-color: var(--green); color: var(--green); }
+  #toast.err { border-color: var(--red);   color: var(--red); }
+</style>
+</head>
+<body>
+<nav>
+  <a class="nav-logo" href="/admin/panel">⚔️ Tu Tiên Admin</a>
+  <span class="nav-badge">ADMIN</span>
+  <div class="nav-right">
+    <span class="nav-user">👤 {{ user }}</span>
+    <a class="btn-logout" href="/admin/logout">Đăng xuất</a>
+  </div>
+</nav>
+
+<main>
+  <!-- STATUS -->
+  <div class="status-bar">
+    <div class="status-dot {% if status == 'running' %}running{% endif %}" id="dot"></div>
+    <span class="status-label {% if status == 'running' %}running{% else %}stopped{% endif %}" id="status-label">
+      {% if status == 'running' %}🟢 Bot đang chạy{% else %}🔴 Bot đã dừng{% endif %}
+    </span>
+    <div class="btn-group">
+      <button class="btn btn-start"   onclick="botAction('start')"  {% if status=='running' %}disabled{% endif %}>▶ Khởi Động</button>
+      <button class="btn btn-stop"    onclick="botAction('stop')"   {% if status=='stopped' %}disabled{% endif %}>⏹ Dừng</button>
+      <button class="btn btn-restart" onclick="botAction('restart')">🔄 Restart</button>
+      <button class="btn btn-refresh" onclick="refreshStatus()">↻</button>
+    </div>
+  </div>
+
+  <!-- STATS -->
+  <div class="stat-row">
+    <div class="stat-card">
+      <div class="val">{{ stats.total_players }}</div>
+      <div class="lbl">👥 Tổng Tu Sĩ</div>
+    </div>
+    <div class="stat-card">
+      <div class="val">{{ stats.online_today }}</div>
+      <div class="lbl">⚡ Đang Hoạt Động</div>
+    </div>
+    <div class="stat-card">
+      <div class="val" id="uptime-val">—</div>
+      <div class="lbl">⏱️ Trạng Thái</div>
+    </div>
+  </div>
+
+  <!-- LOG + PLAYERS -->
+  <div class="grid2">
+    <div class="card">
+      <div class="card-title" style="display:flex;justify-content:space-between">
+        📋 Bot Log (50 dòng cuối)
+        <span style="cursor:pointer;color:var(--gold)" onclick="refreshLog()">↻ Làm mới</span>
+      </div>
+      <div class="log-box" id="log-box">{{ log }}</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">👥 Top Tu Sĩ (50 mạnh nhất)</div>
+      <div style="max-height:220px;overflow-y:auto;">
+        <table class="p-table" id="players-table">
+          <thead>
+            <tr><th>#</th><th>Tên</th><th>Cảnh Giới</th><th>Lực Chiến</th><th>Trạng Thái</th></tr>
+          </thead>
+          <tbody id="players-body">
+            <tr><td colspan="5" style="text-align:center;color:var(--text2);padding:16px">Đang tải...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+function toast(msg, ok=true) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show ' + (ok ? 'ok' : 'err');
+  setTimeout(() => t.className = '', 3000);
+}
+
+async function botAction(action) {
+  const btns = document.querySelectorAll('.btn');
+  btns.forEach(b => b.disabled = true);
+
+  try {
+    const r = await fetch(`/admin/api/${action}`, {method:'POST'});
+    const d = await r.json();
+    toast(d.msg, d.ok);
+    setTimeout(refreshStatus, 1500);
+  } catch(e) {
+    toast('Lỗi kết nối!', false);
+  }
+  setTimeout(() => refreshStatus(), 2000);
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/admin/api/status');
+    const d = await r.json();
+    const running = d.status === 'running';
+
+    document.getElementById('dot').className = 'status-dot' + (running ? ' running' : '');
+    const lbl = document.getElementById('status-label');
+    lbl.textContent = running ? '🟢 Bot đang chạy' : '🔴 Bot đã dừng';
+    lbl.className = 'status-label ' + (running ? 'running' : 'stopped');
+    document.getElementById('uptime-val').textContent = running ? 'Online' : 'Offline';
+
+    // Cập nhật nút
+    document.querySelectorAll('.btn-start').forEach(b => b.disabled = running);
+    document.querySelectorAll('.btn-stop').forEach(b  => b.disabled = !running);
+  } catch(e) {}
+}
+
+async function refreshLog() {
+  try {
+    const r = await fetch('/admin/api/log');
+    const d = await r.json();
+    const box = document.getElementById('log-box');
+    box.textContent = d.log;
+    box.scrollTop = box.scrollHeight;
+  } catch(e) {}
+}
+
+async function loadPlayers() {
+  try {
+    const r = await fetch('/admin/api/players');
+    const data = await r.json();
+    const STATUS_CLASS = {
+      idle: 'status-idle',
+      cultivating: 'status-cultivating',
+      exploring: 'status-exploring',
+    };
+    const STATUS_LABEL = {
+      idle: 'Nghỉ', cultivating: 'Tu Luyện', exploring: 'Thám Hiểm',
+    };
+    document.getElementById('players-body').innerHTML = data.map((p,i) => `
+      <tr onclick="location.href='/profile/${p.user_id}'" style="cursor:pointer">
+        <td style="color:var(--text2)">${i+1}</td>
+        <td><b>${p.name}</b></td>
+        <td style="font-size:0.75rem;color:var(--text2)">${p.realm}</td>
+        <td style="color:var(--gold)">${p.luc_chien}</td>
+        <td><span class="status-pill ${STATUS_CLASS[p.status]||'status-idle'}">${STATUS_LABEL[p.status]||p.status}</span></td>
+      </tr>
+    `).join('');
+  } catch(e) {}
+}
+
+// Auto refresh mỗi 10s
+refreshStatus();
+refreshLog();
+loadPlayers();
+setInterval(refreshStatus, 10000);
+setInterval(refreshLog,    15000);
+
+// Scroll log xuống cuối
+const logBox = document.getElementById('log-box');
+logBox.scrollTop = logBox.scrollHeight;
+</script>
+</body>
+</html>

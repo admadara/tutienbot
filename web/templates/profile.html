@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+{% block title %}Profile Tu Sĩ{% endblock %}
+{% block content %}
+<div id="content">
+  <div class="loading"><div class="spinner"></div>Đang tải profile...</div>
+</div>
+
+<script>
+const uid = "{{ user_id }}";
+fetch('/api/profile/' + uid)
+  .then(r => { if (!r.ok) throw new Error('404'); return r.json(); })
+  .then(p => render(p))
+  .catch(() => {
+    document.getElementById('content').innerHTML = `
+      <div class="error-box">
+        <div style="font-size:2rem;margin-bottom:8px">😶</div>
+        <b>Không tìm thấy tu sĩ</b><br>
+        <span style="font-size:0.85rem;color:var(--text2)">User ID không tồn tại hoặc chưa nhập môn</span><br><br>
+        <a href="/" style="color:var(--gold)">← Quay lại</a>
+      </div>`;
+  });
+
+function render(p) {
+  const prestige = p.prestige > 0
+    ? `<span class="badge" style="background:rgba(255,100,100,0.15);color:#ff9898;border-color:rgba(255,100,100,0.3)">✨ Chuyển Sinh ×${p.prestige}</span>`
+    : '';
+
+  const staminaPct = Math.round(p.stamina / p.stamina_max * 100);
+  const suPhu = p.su_phu
+    ? `<div style="background:var(--bg3);border-radius:8px;padding:12px;margin-top:8px">
+        <div style="font-size:0.75rem;color:var(--text2)">👴 Sư Phụ</div>
+        <a href="/profile/${p.su_phu.user_id||''}" style="color:var(--gold);font-weight:700;text-decoration:none">${p.su_phu.name}</a>
+        <div style="font-size:0.8rem;color:var(--text2)">${p.su_phu.realm}</div>
+        <div style="font-size:0.75rem;color:var(--text2)">Tu Vi đã nhận: ${p.su_phu.exp_shared}</div>
+       </div>`
+    : '';
+
+  const doDe = p.do_de && p.do_de.length > 0
+    ? `<div style="background:var(--bg3);border-radius:8px;padding:12px;margin-top:8px">
+        <div style="font-size:0.75rem;color:var(--text2);margin-bottom:6px">👨‍👩‍👧‍👦 Đồ Đệ (${p.do_de.length})</div>
+        ${p.do_de.map(d=>`<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);font-size:0.85rem">
+          <span style="color:var(--text)">${d.name}</span>
+          <span style="color:var(--text2);font-size:0.75rem">${d.realm}</span>
+        </div>`).join('')}
+       </div>`
+    : '';
+
+  document.getElementById('content').innerHTML = `
+    <!-- HEADER -->
+    <div class="card" style="background: linear-gradient(135deg, var(--bg2) 0%, var(--bg3) 100%); border-color: ${p.realm_color}44; position:relative; overflow:hidden;">
+      <div style="position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,${p.realm_color},transparent)"></div>
+      <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;">
+        <div style="width:64px;height:64px;border-radius:50%;background:${p.realm_color}22;border:2px solid ${p.realm_color};display:flex;align-items:center;justify-content:center;font-size:1.8rem;flex-shrink:0;">⚔️</div>
+        <div style="flex:1;min-width:180px;">
+          <h2 style="font-size:1.4rem;margin-bottom:4px;">${p.name}</h2>
+          <div style="margin-bottom:8px;">
+            <span class="badge" style="background:${p.realm_color}22;color:${p.realm_color};border-color:${p.realm_color}55">${p.realm}</span>
+            ${prestige}
+            ${p.sect ? `<span class="badge" style="margin-left:6px">🏯 ${p.sect}</span>` : ''}
+          </div>
+          <div style="font-size:0.8rem;color:var(--text2)">ID: ${p.user_id}</div>
+        </div>
+        <div style="text-align:right;min-width:100px;">
+          <div style="font-size:0.75rem;color:var(--text2)">Lực Chiến</div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--gold)">⚡${p.luc_chien}</div>
+        </div>
+      </div>
+
+      <!-- Stamina -->
+      <div style="margin-top:16px;">
+        <div style="display:flex;justify-content:space-between;font-size:0.75rem;color:var(--text2);margin-bottom:4px;">
+          <span>🔋 Thể Lực</span><span>${p.stamina}/${p.stamina_max}</span>
+        </div>
+        <div class="bar-wrap">
+          <div class="bar-fill" style="width:${staminaPct}%;background:linear-gradient(90deg,#4CAF50,#8BC34A)"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TU VI / LINH CĂN -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div class="card">
+        <div class="card-title">🌊 Căn Cơ</div>
+        <div style="display:grid;gap:8px;font-size:0.85rem;">
+          <div style="display:flex;justify-content:space-between;padding:6px;background:var(--bg3);border-radius:6px">
+            <span style="color:var(--text2)">Đạo</span><span style="color:var(--gold)">${p.dao}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:6px;background:var(--bg3);border-radius:6px">
+            <span style="color:var(--text2)">Linh Căn</span><span style="color:#7EC8E3">${p.linh_can}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:6px;background:var(--bg3);border-radius:6px">
+            <span style="color:var(--text2)">Thể Chất</span><span style="color:#98D8C8">${p.the_chat}</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;padding:6px;background:var(--bg3);border-radius:6px">
+            <span style="color:var(--text2)">Huyết Mạch</span><span style="color:#F4A7B9">${p.huyet_mach}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">💰 Linh Thạch</div>
+        <div style="display:grid;gap:8px;">
+          <div style="background:var(--bg3);border-radius:6px;padding:8px;text-align:center">
+            <div style="font-size:0.7rem;color:var(--text2)">👑 Cực Phẩm</div>
+            <div style="font-size:1.1rem;font-weight:700;color:#FFD700">${p.lt_cuc}</div>
+          </div>
+          <div style="background:var(--bg3);border-radius:6px;padding:8px;text-align:center">
+            <div style="font-size:0.7rem;color:var(--text2)">💎 Trung Phẩm</div>
+            <div style="font-size:1.1rem;font-weight:700;color:#7EB8F7">${p.lt_trung}</div>
+          </div>
+          <div style="background:var(--bg3);border-radius:6px;padding:8px;text-align:center">
+            <div style="font-size:0.7rem;color:var(--text2)">💰 Hạ Phẩm</div>
+            <div style="font-size:1.1rem;font-weight:700;color:#98D8A0">${p.lt_ha}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CHIẾN THUẬT -->
+    <div class="card">
+      <div class="card-title">⚔️ Chiến Lực</div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="label">⚔️ ATK</div><div class="val">${p.atk}</div></div>
+        <div class="stat-box"><div class="label">🛡️ DEF</div><div class="val">${p.def_}</div></div>
+        <div class="stat-box"><div class="label">❤️ HP</div><div class="val">${p.hp}</div></div>
+        <div class="stat-box"><div class="label">💨 SPD</div><div class="val">${p.spd}</div></div>
+        <div class="stat-box"><div class="label">🎯 CRIT</div><div class="val">${p.crit}</div></div>
+        <div class="stat-box"><div class="label">🍀 Luck</div><div class="val">${p.luck}</div></div>
+      </div>
+    </div>
+
+    <!-- THỐNG KÊ -->
+    <div class="card">
+      <div class="card-title">📊 Thống Kê</div>
+      <div class="stat-grid">
+        <div class="stat-box"><div class="label">🏆 PvP Thắng</div><div class="val">${p.total_pk_win}</div></div>
+        <div class="stat-box"><div class="label">🗺️ Khám Phá</div><div class="val">${p.total_explore}</div></div>
+        <div class="stat-box"><div class="label">👹 Boss</div><div class="val">${p.total_boss}</div></div>
+        <div class="stat-box"><div class="label">🎣 FishCoin</div><div class="val">${p.fish_coin}</div></div>
+        <div class="stat-box"><div class="label">🐚 Hải Trân</div><div class="val">${p.hai_tran}</div></div>
+        <div class="stat-box"><div class="label">✨ Tu Vi</div><div class="val">${p.exp}</div></div>
+      </div>
+    </div>
+
+    <!-- SƯ ĐẠO -->
+    ${(p.su_phu || (p.do_de && p.do_de.length > 0)) ? `
+    <div class="card">
+      <div class="card-title">🏯 Sư Đạo</div>
+      ${suPhu}
+      ${doDe}
+    </div>` : ''}
+  `;
+}
+</script>
+{% endblock %}

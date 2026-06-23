@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Tu Tiên Bot — Trang Chủ{% endblock %}
+{% block content %}
+<div style="text-align:center; padding: 48px 0 32px;">
+  <div style="font-size:3rem; margin-bottom:12px;">⚔️</div>
+  <h1 style="font-size:2rem; color:var(--gold); margin-bottom:8px;">Tu Tiên Bot</h1>
+  <p style="color:var(--text2); margin-bottom:32px;">Xem profile & bảng xếp hạng tu tiên</p>
+
+  <div class="search-box" style="max-width:480px; margin:0 auto;">
+    <input type="text" id="uid-input" placeholder="Nhập Discord User ID..." />
+    <button onclick="goProfile()">Xem Profile</button>
+  </div>
+  <p style="color:var(--text2); font-size:0.8rem; margin-top:8px;">
+    💡 Dùng lệnh <code style="background:var(--bg3);padding:2px 6px;border-radius:4px;">,tl id</code> trong Discord để lấy User ID của bạn
+  </p>
+</div>
+
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; max-width:600px; margin:0 auto;">
+  <a href="/bxh" style="text-decoration:none;">
+    <div class="card" style="text-align:center; cursor:pointer; transition:border-color 0.2s;" onmouseover="this.style.borderColor='var(--gold)'" onmouseout="this.style.borderColor='var(--border)'">
+      <div style="font-size:2rem; margin-bottom:8px;">🏆</div>
+      <div style="font-weight:700; color:var(--gold);">Bảng Xếp Hạng</div>
+      <div style="font-size:0.8rem; color:var(--text2); margin-top:4px;">Top tu sĩ mạnh nhất</div>
+    </div>
+  </a>
+  <div class="card" style="text-align:center;">
+    <div style="font-size:2rem; margin-bottom:8px;">📊</div>
+    <div style="font-weight:700; color:var(--gold);">Thống Kê</div>
+    <div style="font-size:0.8rem; color:var(--text2); margin-top:4px;" id="stat-count">Đang tải...</div>
+  </div>
+</div>
+
+<script>
+  function goProfile() {
+    const id = document.getElementById('uid-input').value.trim();
+    if (!id) return;
+    location.href = '/profile/' + id;
+  }
+  document.getElementById('uid-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') goProfile();
+  });
+
+  // Lấy số người chơi
+  fetch('/api/bxh/exp').then(r=>r.json()).then(data=>{
+    document.getElementById('stat-count').textContent = `${data.length}+ tu sĩ đang hoạt động`;
+  }).catch(()=>{
+    document.getElementById('stat-count').textContent = 'Server đang hoạt động';
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}BXH Tu Tiên Bot{% endblock %}
+{% block content %}
+<h2 style="font-size:1.4rem;color:var(--gold);margin-bottom:16px;">🏆 Bảng Xếp Hạng</h2>
+
+<div class="tabs">
+  <div class="tab active" onclick="loadTab('exp',this)">✨ Tu Vi</div>
+  <div class="tab" onclick="loadTab('luc_chien',this)">⚡ Lực Chiến</div>
+  <div class="tab" onclick="loadTab('pk',this)">⚔️ PvP</div>
+  <div class="tab" onclick="loadTab('fish',this)">🎣 FishCoin</div>
+  <div class="tab" onclick="loadTab('haitran',this)">🐚 Hải Trân</div>
+</div>
+
+<div id="bxh-content">
+  <div class="loading"><div class="spinner"></div>Đang tải...</div>
+</div>
+
+<script>
+let currentTab = 'exp';
+
+function loadTab(loai, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  currentTab = loai;
+
+  document.getElementById('bxh-content').innerHTML =
+    '<div class="loading"><div class="spinner"></div>Đang tải...</div>';
+
+  fetch('/api/bxh/' + loai)
+    .then(r => r.json())
+    .then(data => renderBXH(data, loai))
+    .catch(() => {
+      document.getElementById('bxh-content').innerHTML =
+        '<div class="error-box">Không thể tải dữ liệu</div>';
+    });
+}
+
+const LABELS = {
+  exp: '✨ Tu Vi', luc_chien: '⚡ Lực Chiến',
+  pk: '🏆 PvP Thắng', fish: '🎣 FishCoin', haitran: '🐚 Hải Trân'
+};
+
+function renderBXH(data, loai) {
+  if (!data.length) {
+    document.getElementById('bxh-content').innerHTML =
+      '<div class="error-box">Chưa có dữ liệu</div>';
+    return;
+  }
+
+  const MEDALS = ['🥇','🥈','🥉'];
+  const rows = data.map((p, i) => `
+    <tr class="rank-${p.rank}" onclick="location.href='/profile/${p.user_id}'" style="cursor:pointer">
+      <td class="rank-num">${p.rank <= 3 ? MEDALS[p.rank-1] : p.rank}</td>
+      <td>
+        <div style="font-weight:${p.rank<=3?'700':'500'};font-size:0.95rem">${p.name}</div>
+        <div style="font-size:0.75rem;color:${p.color}">${p.realm}</div>
+      </td>
+      <td style="text-align:right;font-weight:600;color:var(--gold)">${p.value}</td>
+    </tr>
+  `).join('');
+
+  document.getElementById('bxh-content').innerHTML = `
+    <div class="card" style="padding:0;overflow:hidden;">
+      <table class="rank-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Tu Sĩ</th>
+            <th style="text-align:right">${LABELS[loai]}</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+// Load mặc định
+loadTab('exp', document.querySelector('.tab'));
+</script>
+{% endblock %}

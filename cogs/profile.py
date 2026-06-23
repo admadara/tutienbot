@@ -1,0 +1,1255 @@
+"""cogs/profile.py v5 - Lệnh ,tl i redesign + ,tl tracuu"""
+import discord
+from discord.ext import commands
+import json
+from utils.helpers import require_player, now
+from utils.embeds import (
+    realm_color, realm_icon, bar, bar_color,
+    fmt, fmt_time, fmt_lt, make, warn, info, error
+)
+from utils.game_data import (
+    get_realm_name, get_exp_req, DAO, ITEMS,
+    LINHTHU_DATA, RARITY_EMOJI, REALMS,
+    prestige_exp_mult, get_prestige_title
+)
+
+# ── Pollinations.ai prompt theo Đạo ────────────────────────────────────────
+_DAO_PROMPTS = {
+    "nhapma":   "dark demonic cultivator xianxia, dark purple demonic energy swirling, menacing aura, ancient chinese sect ruins, dramatic shadows, cinematic lighting, ultra detailed fantasy art, no text",
+    "nhapdao":  "righteous sword cultivator xianxia, golden divine light, chinese immortal warrior, flowing white robes, mountain peaks clouds background, cinematic lighting, ultra detailed fantasy art, no text",
+    "nhapnho":  "scholar cultivator xianxia, blue celestial energy, ancient chinese library sect, protective barrier magic, glowing scripture scrolls, cinematic lighting, ultra detailed fantasy art, no text",
+    "nhapquy":  "ghost speed cultivator xianxia, teal phantom energy, ethereal chinese ghost warrior, afterimage blur, haunted ancient temple fog, cinematic lighting, ultra detailed fantasy art, no text",
+    "nhapyeu":  "demon beast cultivator xianxia, crimson life energy aura, half-beast half-human warrior, ancient spirit forest, glowing red eyes vitality power, cinematic lighting, ultra detailed fantasy art, no text",
+    "nhaplo":   "comical potion cultivator xianxia, green lucky aura, funny chinese alchemist with overflowing glowing bottles, cartoon meets fantasy art style, bright colors, no text",
+    "thiendao": "supreme heaven dao cultivator xianxia, blinding golden white divine light, celestial realm above clouds, godlike presence, stars galaxies swirling, epic cinematic, ultra detailed fantasy art, no text",
+    "thiensu":  "divine messenger cultivator xianxia, holy white golden wings, angelic chinese warrior, heavenly palace background, radiant divine aura, cinematic lighting, ultra detailed fantasy art, no text",
+}
+_DEFAULT_PROMPT = "ancient chinese cultivation sect, xianxia fantasy art, cinematic lighting, ultra detailed, no text"
+
+async def _get_pollinations_url(dao_key: str, seed: int = None) -> str:
+    """Trả về URL ảnh Pollinations theo Đạo."""
+    import random, urllib.parse
+    prompt = _DAO_PROMPTS.get(dao_key, _DEFAULT_PROMPT)
+    if seed is None:
+        seed = random.randint(1, 99999)
+    encoded = urllib.parse.quote(prompt)
+    return f"https://image.pollinations.ai/prompt/{encoded}?width=512&height=288&seed={seed}&nologo=true&enhance=true"
+
+async def _fetch_pollinations(session, dao_key: str, seed: int = None):
+    """Fetch ảnh Pollinations, trả về bytes hoặc None nếu lỗi."""
+    import random
+    url = await _get_pollinations_url(dao_key, seed or random.randint(1, 99999))
+    try:
+        async with session.get(url, timeout=__import__('aiohttp').ClientTimeout(total=15)) as r:
+            if r.status == 200:
+                return await r.read()
+    except Exception:
+        pass
+    return None
+
+def _s(n) -> str:
+    """Format số dùng bảng đơn vị chung (k, m, b, t, q, Q, s, S, o, N, ...)"""
+    return fmt(n)
+
+def _sci(n) -> str:
+    """Format số dạng khoa học cho ,tl i: 1.23e60, dùng khi số quá lớn."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return str(n)
+    if n == 0:
+        return "0"
+    if abs(n) < 1e6:
+        # Số nhỏ thì vẫn hiện bình thường
+        v = int(n) if n == int(n) else round(n, 2)
+        return f"{v:,}"
+    # Dạng Xe+Y rút gọn
+    import math
+    exp = int(math.floor(math.log10(abs(n))))
+    mant = n / (10 ** exp)
+    mant_str = f"{mant:.2f}".rstrip("0").rstrip(".")
+    return f"{mant_str}e{exp}"
+
+def _safe(p, k, d=0):
+    v = p.get(k)
+    return v if v is not None else d
+
+def _calc_luc_chien(p, eq_atk=0, eq_def=0, eq_hp=0):
+    """Tính lực chiến - đồng bộ với cultivation._calc_lc + realm/tier bonus"""
+    ri   = int(_safe(p, "realm_index", 0))
+    tier = int(_safe(p, "realm_tier", 1))
+
+    atk  = float(_safe(p, "atk",    100)) + eq_atk
+    def_ = float(_safe(p, "def_",    50)) + eq_def
+    hp   = float(_safe(p, "hp_max", 1000)) + eq_hp
+    spd  = float(_safe(p, "spd",     50))
+    crit = float(_safe(p, "crit",    5.0))
+
+    # Công thức giống cultivation._calc_lc
+    base = atk*2.0 + def_*1.2 + hp*0.005 + spd*0.8 + crit*50
+
+    # Realm và tier bonus
+    tier_mult  = (1.20) ** (tier - 1) if tier > 1 else 1.0
+    realm_mult = (1.5)  ** ri         if ri > 0   else 1.0
+
+    result = base * tier_mult * realm_mult
+    import math
+    if math.isinf(result) or math.isnan(result):
+        return int(1e18)
+    return round(result)
+
+class Profile(commands.Cog):
+    def __init__(self, bot): self.bot = bot
+
+    @commands.command(name="status", aliases=["profile"])
+    async def status(self, ctx):
+        player = await self.bot.db.get_player(ctx.author.id)
+        if not player:
+            await ctx.send(embed=warn("Chưa nhập môn! Dùng `,tl nhapdao`.")); return
+        await self._card(ctx, player)
+
+    @commands.command(name="i", aliases=["chiso", "chitiet"])
+    async def chiso(self, ctx):
+        p = await self.bot.db.get_player(ctx.author.id)
+        await self._stats(ctx, p)
+
+    @commands.command(name="tracuu", aliases=["item_info", "vp", "tc"])
+    async def tracuu(self, ctx, *, query: str = None):
+        """Tra cứu vật phẩm hoặc trang bị theo id hoặc tên"""
+        if not query:
+            await ctx.send(embed=warn(
+                "**Cách dùng:** `,tl tracuu [id hoặc tên vật phẩm]`\n"
+                "Ví dụ: `,tl tracuu sat_tien_kiem` hoặc `,tl tracuu Sát Tiên`"
+            ))
+            return
+
+        q = query.lower().strip()
+        results = []
+
+        # Tìm exact match trước
+        if q in ITEMS:
+            results.append((q, ITEMS[q]))
+        else:
+            # Tìm partial match theo id hoặc tên
+            for iid, idata in ITEMS.items():
+                name_lower = idata.get("name", "").lower()
+                if q in iid.lower() or q in name_lower:
+                    results.append((iid, idata))
+
+        if not results:
+            # Gợi ý gần giống
+            from difflib import get_close_matches
+            all_ids   = list(ITEMS.keys())
+            all_names = [v.get("name","").lower() for v in ITEMS.values()]
+            matches_id   = get_close_matches(q, all_ids,   n=3, cutoff=0.5)
+            matches_name = get_close_matches(q, all_names, n=3, cutoff=0.5)
+            sug = []
+            for mid in matches_id:
+                sug.append(f"`{mid}` — {ITEMS[mid].get('name','?')}")
+            for mn in matches_name:
+                for iid, iv in ITEMS.items():
+                    if iv.get("name","").lower() == mn and iid not in matches_id:
+                        sug.append(f"`{iid}` — {iv.get('name','?')}")
+            embed = error(f"Không tìm thấy vật phẩm **`{query}`**!")
+            if sug:
+                embed.add_field(name="💡 Có thể bạn muốn tìm?", value="\n".join(sug[:5]), inline=False)
+            await ctx.send(embed=embed)
+            return
+
+        # Hiện tối đa 5 kết quả
+        if len(results) > 5:
+            # Nếu quá nhiều, ưu tiên exact match hoặc bắt đầu bằng query
+            exact = [(k,v) for k,v in results if k == q or v.get("name","").lower() == q]
+            results = (exact + [x for x in results if x not in exact])[:5]
+
+        TYPE_ICON = {
+            "dan_duoc":   "💊",
+            "vukhi":      "⚔️",
+            "giap":       "🛡️",
+            "mu":         "🪖",
+            "vongco":     "📿",
+            "gangtay":    "🧤",
+            "giay":       "👟",
+            "phap_bao":   "🔮",
+            "nguyen_lieu":"🪨",
+            "ruong":      "📦",
+            "ngoc":       "💎",
+            "special":    "✨",
+            "linhthu_egg":"🥚",
+        }
+        TYPE_NAME = {
+            "dan_duoc":   "Đan Dược",
+            "vukhi":      "Vũ Khí",
+            "giap":       "Giáp Phục",
+            "mu":         "Mũ",
+            "vongco":     "Vòng Cổ",
+            "gangtay":    "Găng Tay",
+            "giay":       "Giày",
+            "phap_bao":   "Pháp Bảo",
+            "nguyen_lieu":"Nguyên Liệu",
+            "ruong":      "Rương",
+            "ngoc":       "Ngọc",
+            "special":    "Đặc Biệt",
+            "linhthu_egg":"Trứng Linh Thú",
+        }
+
+        for iid, data in results:
+            t     = data.get("type", "special")
+            icon  = TYPE_ICON.get(t, "📦")
+            tname = TYPE_NAME.get(t, t)
+            price = data.get("price", 0)
+
+            embed = discord.Embed(
+                title=f"{icon} {data.get('name', iid)}",
+                color=0x9C27B0
+            )
+            embed.add_field(name="🆔 ID",   value=f"`{iid}`",  inline=True)
+            embed.add_field(name="📂 Loại", value=tname,       inline=True)
+            if price:
+                embed.add_field(name="💰 Giá", value=f"{price:,} Hạ", inline=True)
+
+            # Thống kê chiến đấu (trang bị)
+            stats = []
+            if data.get("atk"):       stats.append(f"⚔️ ATK +**{data['atk']:,}**")
+            elif data.get("base_atk"):stats.append(f"⚔️ ATK +**{data['base_atk']:,}**")
+            if data.get("def_"):      stats.append(f"🛡️ DEF +**{data['def_']:,}**")
+            elif data.get("base_def"):stats.append(f"🛡️ DEF +**{data['base_def']:,}**")
+            if data.get("base_hp"):   stats.append(f"❤️ HP +**{data['base_hp']:,}**")
+            if data.get("spd"):       stats.append(f"⚡ SPD +**{data['spd']:,}**")
+            elif data.get("base_spd"):stats.append(f"⚡ SPD +**{data['base_spd']:,}**")
+            if data.get("crit_bonus"):stats.append(f"💥 Crit +**{data['crit_bonus']*100:.0f}%**")
+            if data.get("life_steal"):stats.append(f"🩸 Hút Máu +**{data['life_steal']*100:.0f}%**")
+            if data.get("ignore_def"):stats.append(f"🗡️ Phá Giáp +**{data['ignore_def']*100:.0f}%**")
+            if data.get("tier"):      stats.append(f"{data.get('tier_emoji','')} Cấp: **{data['tier']}**")
+            if stats:
+                embed.add_field(name="📊 Chỉ Số", value="\n".join(stats), inline=False)
+
+            # Đan dược
+            if data.get("exp"):
+                embed.add_field(name="✨ EXP", value=f"+{data['exp']:,}", inline=True)
+            if data.get("exp_rate_bonus"):
+                dur = data.get("duration", 0)
+                embed.add_field(name="⚡ Buff", value=f"+{data['exp_rate_bonus']*100:.0f}% EXP tốc độ ({fmt_time(dur)})", inline=True)
+            if data.get("hp_restore"):
+                embed.add_field(name="❤️ Hồi HP", value=f"+{data['hp_restore']:,}", inline=True)
+            if data.get("stamina_restore"):
+                embed.add_field(name="🔋 Hồi Thể Lực", value=f"+{data['stamina_restore']}", inline=True)
+            if data.get("luck_bonus"):
+                embed.add_field(name="🍀 Vận Khí", value=f"+{data['luck_bonus']}", inline=True)
+
+            slot = data.get("slot")
+            if slot:
+                slot_name = {"weapon":"⚔️ Vũ Khí","armor":"🛡️ Giáp","hat":"🪖 Mũ",
+                             "necklace":"📿 Vòng Cổ","gloves":"🧤 Găng","boots":"👟 Giày",
+                             "phapbao":"🔮 Pháp Bảo"}.get(slot, slot)
+                embed.add_field(name="📌 Vị Trí", value=slot_name, inline=True)
+
+            embed.set_footer(text=f"Tu Tiên Bot v4  •  ,tl mua {iid} để mua")
+            await ctx.send(embed=embed)
+
+    # ── HỒ SƠ ─────────────────────────────────────────────
+    async def _card(self, ctx, p):
+        ri      = int(_safe(p, "realm_index", 0))
+        exp_req = get_exp_req(p)
+        exp_cur = int(_safe(p, "exp", 0))
+        dao     = DAO.get(p.get("dao",""), {"name":"Chưa Chọn","icon":"❓"})
+        elapsed = now() - int(_safe(p,"status_start",0)) if _safe(p,"status_start") else 0
+        status  = _safe(p,"status","idle")
+        STATUS_TXT = {
+            "idle":     "☕ ĐANG RẢNH RỖI",
+            "beQuan":   f"🧘 BẾ QUAN {fmt_time(elapsed)}",
+            "thamHiem": f"⚔️ THÁM HIỂM {fmt_time(elapsed)}",
+            "pk":       "🥊 GIAO ĐẤU",
+            "luyen_dan":"⚗️ LUYỆN ĐAN",
+        }
+        stam = int(_safe(p,"stamina",100))
+        smax = int(_safe(p,"stamina_max",100))
+        lc   = _calc_luc_chien(p)  # Tính real-time thay vì đọc DB
+
+        try:
+            from PIL import Image, ImageDraw, ImageFont, ImageFilter
+            import aiohttp, io, math, os, random as _rnd, numpy as np
+
+            W, H = 800, 1100
+
+            # ── Màu realm ──────────────────────────────────────
+            from utils.embeds import REALM_COLORS
+            rc_int = REALM_COLORS[min(ri, len(REALM_COLORS)-1)]
+            RC = ((rc_int>>16)&0xFF, (rc_int>>8)&0xFF, rc_int&0xFF)
+
+            _rnd.seed(ri * 13 + (ord(p["name"][0]) if p.get("name") else 0))
+
+            # ── Background: dùng ảnh profile_bg.jpg ─────────────
+            import os as _os
+            _bg_path = _os.path.join(_os.path.dirname(__file__), "..", "assets", "profile_bg.jpg")
+            if _os.path.exists(_bg_path):
+                bg = Image.open(_bg_path).convert("RGBA").resize((W, H), Image.LANCZOS)
+            else:
+                # Fallback: gradient tối
+                arr = np.zeros((H, W, 4), dtype=np.uint8)
+                arr[:,:,2] = 30; arr[:,:,3] = 255
+                bg = Image.fromarray(arr, "RGBA")
+
+            # Overlay tông màu realm (nhẹ, giữ ảnh gốc rõ)
+            tint = Image.new("RGBA", (W, H), (*RC, 35))
+            bg = Image.alpha_composite(bg, tint)
+
+            draw = ImageDraw.Draw(bg)
+
+            # ── Load fonts ──────────────────────────────────────
+            FONT_PATHS = [
+                "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+                "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf",
+                "/system/fonts/NotoSansCJK-Regular.ttc",
+                "/system/fonts/DroidSansFallback.ttf",
+            ]
+            def F(size, bold=False):
+                tried = ([fp for fp in FONT_PATHS if "Bold" in fp] if bold else []) + FONT_PATHS
+                for fp in tried:
+                    if os.path.exists(fp):
+                        try: return ImageFont.truetype(fp, size)
+                        except: pass
+                return ImageFont.load_default()
+
+            fT  = F(56, True)   # Title "HỒ SƠ TU TIÊN"
+            fN  = F(40, True)   # Tên
+            fR  = F(24)         # Cảnh giới
+            fD  = F(21)         # Đạo tâm
+            fLB = F(17, True)   # Label box
+            fLV = F(30, True)   # Value box
+            fSV = F(40, True)   # Status value
+            fSM = F(23)         # Small text
+
+            # ── Helper text với stroke đậm (như ảnh 1) ──────────
+            def txt(x, y, text, font, fill, anchor="la", stroke_w=0, stroke_c=(0,0,0)):
+                if stroke_w > 0:
+                    for dx in range(-stroke_w, stroke_w+1):
+                        for dy in range(-stroke_w, stroke_w+1):
+                            if dx*dx + dy*dy <= stroke_w*stroke_w:
+                                draw.text((x+dx, y+dy), text, font=font,
+                                    fill=(*stroke_c, 220), anchor=anchor)
+                # Shadow
+                draw.text((x+3, y+3), text, font=font,
+                    fill=(0,0,0,180), anchor=anchor)
+                draw.text((x, y), text, font=font, fill=fill, anchor=anchor)
+
+            def rrect(x0, y0, x1, y1, r=16, fill=None, outline=None, ow=2):
+                draw.rounded_rectangle([x0, y0, x1, y1], radius=r,
+                    fill=fill, outline=outline, width=ow)
+
+            # ── Helper vẽ panel glassmorphism ────────────────────
+            def glass_panel(x0, y0, x1, y1, r=16, tint=RC, alpha=170):
+                panel = Image.new("RGBA", (W, H), (0,0,0,0))
+                pd = ImageDraw.Draw(panel)
+                pd.rounded_rectangle([x0,y0,x1,y1], radius=r,
+                    fill=(*[min(255, int(tint[j]*0.12 + 8)) for j in range(3)], alpha))
+                # Top highlight line
+                pd.rounded_rectangle([x0,y0,x1,y0+3], radius=r,
+                    fill=(*RC, 120))
+                bg.alpha_composite(panel)
+
+            # ═══ TITLE BAR ══════════════════════════════════════
+            # Panel title nền trong suốt mờ
+            glass_panel(12, 8, W-12, 74, r=18, alpha=140)
+            # Viền vàng
+            draw.rounded_rectangle([12,8,W-12,74], radius=18,
+                outline=(255,215,50,200), width=2)
+            # Trang trí góc title
+            for cx3, cy3 in [(28,42),(W-28,42)]:
+                for rs in [14, 10, 6]:
+                    draw.ellipse([cx3-rs,cy3-rs,cx3+rs,cy3+rs],
+                        fill=None, outline=(255,215,50, 80+rs*5), width=1)
+            draw.line([(46,42),(130,42)], fill=(255,215,50,180), width=2)
+            draw.line([(W-130,42),(W-46,42)], fill=(255,215,50,180), width=2)
+
+            txt(W//2, 42, "HỒ SƠ TU TIÊN", fT,
+                (255,223,60,255), anchor="mm", stroke_w=2, stroke_c=(120,80,0))
+
+            # ═══ AVATAR PANEL ════════════════════════════════════
+            glass_panel(12, 82, W-12, 260, r=18, alpha=150)
+            draw.rounded_rectangle([12,82,W-12,260], radius=18,
+                outline=(*RC,160), width=2)
+
+            av_cx, av_cy, av_r = 130, 171, 78
+            # Glow rings xung quanh avatar
+            for ring in range(4):
+                al = 130 - ring*28
+                rr = av_r + 6 + ring*7
+                draw.ellipse([av_cx-rr, av_cy-rr, av_cx+rr, av_cy+rr],
+                    fill=None, outline=(*RC, al), width=2)
+
+            # Load avatar
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get(str(ctx.author.display_avatar.url)) as resp:
+                        if resp.status == 200:
+                            av_data = await resp.read()
+                            av = Image.open(io.BytesIO(av_data)).convert("RGBA")
+                            av = av.resize((av_r*2, av_r*2), Image.LANCZOS)
+                            mask = Image.new("L", (av_r*2, av_r*2), 0)
+                            ImageDraw.Draw(mask).ellipse([0,0,av_r*2-1,av_r*2-1], fill=255)
+                            av.putalpha(mask)
+                            bg.paste(av, (av_cx-av_r, av_cy-av_r), av)
+            except:
+                draw.ellipse([av_cx-av_r, av_cy-av_r, av_cx+av_r, av_cy+av_r],
+                    fill=(30,15,50,220))
+
+            # Viền avatar màu realm
+            draw.ellipse([av_cx-av_r-3, av_cy-av_r-3, av_cx+av_r+3, av_cy+av_r+3],
+                fill=None, outline=(*RC, 220), width=3)
+
+            # Tên + info bên phải avatar
+            NX = av_cx + av_r + 30
+            txt(NX, av_cy - 60, p.get("name","???"), fN,
+                (255,255,255,255), stroke_w=2, stroke_c=(0,0,0))
+            _realm_display = "Đạo Tổ" if p.get("dao","") == "thiendao" else get_realm_name(p)
+            txt(NX, av_cy - 14, f"Cảnh Giới: {_realm_display}", fR,
+                (*RC, 240))
+            txt(NX, av_cy + 20, f"Đạo Tâm: {dao['name']}", fD,
+                (210,185,255,220))
+            pp = _safe(p,"passport","???")
+            txt(W-22, av_cy+55, f"#{pp}", F(18), (160,160,190,180), anchor="ra")
+
+            # ═══ STAT BOXES (2×3) ════════════════════════════════
+            BOX_Y0 = 276
+            BW, BH = 376, 96
+            GAP    = 10
+            PAD_X  = 14
+
+            _is_thiendao = p.get("dao","") == "thiendao"
+            BOXES = [
+                ("LUC CHIEN",  "∞" if _is_thiendao else _s(lc),                                        (255,200,50),   (40,30,5),   "⚔"),
+                ("LINH CAN",   "Thiên Đạo Linh Căn" if _is_thiendao else _safe(p,"linh_can","?"),      (80,200,255),   (5,20,45),   "✦"),
+                ("THE CHAT",   "Thái Sơ Thiên Đạo Thể" if _is_thiendao else _safe(p,"the_chat","?"),   (190,100,255),  (28,10,48),  "❀"),
+                ("HUYET MACH", "Hỗn Độn Thần Ma Huyết" if _is_thiendao else _safe(p,"huyet_mach","?"), (255,80,80),    (48,5,5),    "♦"),
+                ("NGO TINH",   _s(int(_safe(p,"ngo_tinh",50))*10000) if _is_thiendao else str(int(_safe(p,"ngo_tinh",50))),              (180,120,255),  (22,10,42),  "✧"),
+                ("PHUC DUYEN", _s(int(_safe(p,"phuc_duyen",50))*10000) if _is_thiendao else str(int(_safe(p,"phuc_duyen",50))),            (60,220,100),   (5,38,12),   "✿"),
+            ]
+            # Label tiếng Việt
+            BOX_LABELS_VN = ["LỰC CHIẾN","LINH CĂN","THỂ CHẤT","HUYẾT MẠCH","NGỘ TÍNH","PHÚC DUYÊN"]
+
+            for i,(label,val,vc,bg_tint,icon) in enumerate(BOXES):
+                col = i % 2
+                row = i // 2
+                bx  = PAD_X + col*(BW+GAP)
+                by  = BOX_Y0 + row*(BH+GAP)
+
+                # Glass panel background
+                glass_panel(bx, by, bx+BW, by+BH, r=16,
+                    tint=tuple(int(bg_tint[j]*2+5) for j in range(3)), alpha=185)
+                draw.rounded_rectangle([bx,by,bx+BW,by+BH], radius=16,
+                    outline=(*vc, 100), width=2)
+
+                # Top gradient bar (đậm hơn)
+                for xi in range(BW-6):
+                    t2 = xi/(BW-6)
+                    gc2 = tuple(min(255,int(vc[j]*(0.2+0.8*t2))) for j in range(3))
+                    draw.line([(bx+3+xi, by+2),(bx+3+xi, by+5)], fill=(*gc2, 200))
+
+                # Icon + Label
+                lbl_vn = BOX_LABELS_VN[i]
+                txt(bx+16, by+14, f"{icon}  {lbl_vn}", fLB, (210,210,230,210))
+                # Value lớn + đậm
+                txt(bx+16, by+46, val, fLV, (*vc, 255), stroke_w=1, stroke_c=(0,0,0))
+
+            # ═══ EXP BAR PANEL ═══════════════════════════════════
+            EP_Y = BOX_Y0 + 3*(BH+GAP) + 14
+            EP_W = W - PAD_X*2
+
+            glass_panel(PAD_X-2, EP_Y-32, W-PAD_X+2, EP_Y+64, r=16, alpha=175)
+            draw.rounded_rectangle([PAD_X-2,EP_Y-32,W-PAD_X+2,EP_Y+64],
+                radius=16, outline=(*RC,90), width=2)
+
+            txt(W//2, EP_Y-14, "TIẾN ĐỘ ĐỘT PHÁ", fSM,
+                (220,220,240,220), anchor="mm")
+
+            # Bar track
+            rrect(PAD_X+6, EP_Y+4, PAD_X+6+EP_W-12, EP_Y+38,
+                r=12, fill=(15,12,35,230))
+
+            # Bar fill gradient
+            if exp_req > 0:
+                pct = min(1.0, exp_cur/exp_req)
+                fw  = int((EP_W-12)*pct)
+                if fw > 4:
+                    for xi in range(fw):
+                        t3  = xi / max(fw, 1)
+                        gc3 = (
+                            min(255, int(30  + RC[0]*0.6 + 80*t3)),
+                            min(255, int(200 - 30*t3)),
+                            min(255, int(60  + RC[2]*0.5 + 40*t3)),
+                        )
+                        draw.line([(PAD_X+6+xi, EP_Y+6),(PAD_X+6+xi, EP_Y+36)],
+                            fill=(*gc3, 255))
+                    # Glow đầu bar
+                    gx = PAD_X + 6 + fw
+                    for gw in range(12, 0, -3):
+                        draw.line([(gx, EP_Y+6),(gx, EP_Y+36)],
+                            fill=(255,255,255, gw*8))
+                        gx -= 1
+                exp_txt = f"{fmt(exp_cur)} / {fmt(exp_req)}"
+                txt(W//2, EP_Y+21, exp_txt, fSM, (255,255,255,240), anchor="mm",
+                    stroke_w=1, stroke_c=(0,0,0))
+            else:
+                txt(W//2, EP_Y+21, "✦ TU VI VIÊN MÃN ✦",
+                    fSM, (255,215,50,255), anchor="mm", stroke_w=1, stroke_c=(80,50,0))
+
+            # ═══ STATUS PANEL ════════════════════════════════════
+            ST_Y = EP_Y + 82
+            glass_panel(PAD_X-2, ST_Y-10, W-PAD_X+2, ST_Y+120, r=16, alpha=175)
+            draw.rounded_rectangle([PAD_X-2,ST_Y-10,W-PAD_X+2,ST_Y+120],
+                radius=16, outline=(*RC,90), width=2)
+
+            txt(W//2, ST_Y+8, "TRẠNG THÁI HIỆN TẠI", fSM,
+                (190,190,215,190), anchor="mm")
+
+            st_str = STATUS_TXT.get(status, status)
+            # Loại bỏ emoji khỏi font DejaVu nếu cần
+            txt(W//2, ST_Y+50, st_str, fSV,
+                (*RC, 255), anchor="mm", stroke_w=2, stroke_c=(0,0,0))
+
+            tl_str = f"The Luc: {stam} / {smax}"
+            txt(W//2, ST_Y+96, tl_str, fSM,
+                (80, 230, 110, 240), anchor="mm")
+
+            # ═══ Corner borders đẹp ═══════════════════════════════
+            CL = 70  # corner length
+            CW = 3
+            corners_lines = [
+                [(12,12),(12,12+CL)], [(12,12),(12+CL,12)],
+                [(W-12,12),(W-12,12+CL)], [(W-12,12),(W-12-CL,12)],
+                [(12,H-12),(12,H-12-CL)], [(12,H-12),(12+CL,H-12)],
+                [(W-12,H-12),(W-12,H-12-CL)], [(W-12,H-12),(W-12-CL,H-12)],
+            ]
+            for pts in corners_lines:
+                draw.line(pts, fill=(*RC, 200), width=CW)
+            # Dot ở mỗi góc
+            for cdot in [(12,12),(W-12,12),(12,H-12),(W-12,H-12)]:
+                draw.ellipse([cdot[0]-5,cdot[1]-5,cdot[0]+5,cdot[1]+5],
+                    fill=(*RC,220))
+
+            # ═══ Footer ═══════════════════════════════════════════
+            txt(W//2, H-16, "Tu Tien Bot v4  •  ,tl i xem chi so chi tiet",
+                F(16), (110,110,150,160), anchor="mm")
+
+            # ── Output ────────────────────────────────────────────
+            out = io.BytesIO()
+            bg.convert("RGB").save(out, "PNG", optimize=True)
+            out.seek(0)
+
+            file  = discord.File(out, filename="profile.png")
+            embed = discord.Embed(color=rc_int)
+            embed.set_image(url="attachment://profile.png")
+            if exp_cur >= exp_req > 0:
+                embed.add_field(name="",
+                    value="✨ **Tu Vi đầy! Gõ `,tl dp` để đột phá!**",
+                    inline=False)
+            embed.set_footer(text="`,tl i` xem chỉ số  •  Tu Tiên Bot v4")
+
+            view = discord.ui.View(timeout=120)
+            view.add_item(discord.ui.Button(label="🧘 Bế Quan",
+                style=discord.ButtonStyle.success,  custom_id="beQuan"))
+            view.add_item(discord.ui.Button(label="🎒 Túi Đồ",
+                style=discord.ButtonStyle.primary,  custom_id="tuido"))
+            view.add_item(discord.ui.Button(label="🗺️ Bí Cảnh",
+                style=discord.ButtonStyle.primary,  custom_id="bicanh"))
+            view.add_item(discord.ui.Button(label="🚀 Đột Phá",
+                style=discord.ButtonStyle.secondary,custom_id="dotpha",
+                disabled=(exp_cur < exp_req)))
+            view.add_item(discord.ui.Button(label="📖 Hướng Dẫn",
+                style=discord.ButtonStyle.secondary,custom_id="help"))
+
+            async def _btn(interaction: discord.Interaction):
+                if interaction.user.id != ctx.author.id:
+                    await interaction.response.send_message(
+                        "❌ Không phải lượt của bạn!", ephemeral=True)
+                    return
+                await interaction.response.defer()
+                cid = interaction.data["custom_id"]
+                CMD = {"beQuan":"start","tuido":"bag",
+                       "bicanh":"bicanh","dotpha":"dp","help":"help"}
+                cmd = self.bot.get_command(CMD.get(cid,""))
+                if cmd: await ctx.invoke(cmd)
+
+            for item in view.children:
+                item.callback = _btn
+
+            await ctx.send(file=file, embed=embed, view=view)
+
+            # Sinh ảnh AI theo Đạo (gửi message riêng, không block profile card)
+            try:
+                import aiohttp as _aio, io as _io
+                _dao_key = p.get("dao", "nhapdao")
+                async with _aio.ClientSession() as _sess:
+                    _ai_bytes = await _fetch_pollinations(_sess, _dao_key)
+                if _ai_bytes:
+                    _dao_info = DAO.get(_dao_key, {"name": "Tu Tiên", "icon": "✨"})
+                    _ai_file = discord.File(_io.BytesIO(_ai_bytes), filename="dao_art.png")
+                    _ai_embed = discord.Embed(
+                        description=f"{_dao_info['icon']} **{_dao_info['name']}** — Hình tượng tu luyện của **{p['name']}**",
+                        color=rc_int
+                    )
+                    _ai_embed.set_image(url="attachment://dao_art.png")
+                    _ai_embed.set_footer(text="🎨 Sinh bởi Pollinations.ai")
+                    await ctx.send(file=_ai_file, embed=_ai_embed)
+            except Exception:
+                pass
+
+            return
+
+        except Exception:
+            import traceback; traceback.print_exc()
+
+        # ── Fallback embed ────────────────────────────────────
+        from utils.embeds import realm_color, realm_icon, bar, bar_color
+        embed = discord.Embed(color=realm_color(ri))
+        embed.set_author(name=f"{realm_icon(ri)} {p['name']}",
+            icon_url=ctx.author.display_avatar.url)
+        _is_thiendao_fb = p.get("dao","") == "thiendao"
+        _fb_realm = "Đạo Tổ" if _is_thiendao_fb else get_realm_name(p)
+        _fb_lc    = "∞" if _is_thiendao_fb else f"{_s(lc)}"
+        _fb_lc2   = "Thiên Đạo Linh Căn" if _is_thiendao_fb else _safe(p,'linh_can','?')
+        _fb_tc    = "Thái Sơ Thiên Đạo Thể" if _is_thiendao_fb else _safe(p,'the_chat','?')
+        _fb_hm    = "Hỗn Độn Thần Ma Huyết" if _is_thiendao_fb else _safe(p,'huyet_mach','?')
+        _fb_nt    = _s(int(_safe(p,'ngo_tinh',50))*10000) if _is_thiendao_fb else str(int(_safe(p,'ngo_tinh',50)))
+        _fb_pd    = _s(int(_safe(p,'phuc_duyen',50))*10000) if _is_thiendao_fb else str(int(_safe(p,'phuc_duyen',50)))
+        embed.add_field(name="🌌 Cảnh Giới", value=f"```{_fb_realm}```", inline=True)
+        embed.add_field(name=f"{dao['icon']} Đạo", value=f"```{dao['name']}```", inline=True)
+        embed.add_field(name="🆔 Passport",
+            value=f"```{_safe(p,'passport','???')}```", inline=True)
+        embed.add_field(name="⚡ Tiến Độ",
+            value=f"{bar(exp_cur,exp_req,20)}\n`{fmt(exp_cur)}` / `{fmt(exp_req)}`",
+            inline=False)
+        embed.add_field(name="⚔️ Lực Chiến", value=f"```{_fb_lc}```",  inline=True)
+        embed.add_field(name="✨ Linh Căn",  value=f"```{_fb_lc2}```", inline=True)
+        embed.add_field(name="💪 Thể Chất",  value=f"```{_fb_tc}```",  inline=True)
+        embed.add_field(name="🩸 Huyết Mạch",value=f"```{_fb_hm}```",  inline=True)
+        embed.add_field(name="🧠 Ngộ Tính",  value=f"```{_fb_nt}```",  inline=True)
+        embed.add_field(name="🍀 Phúc Duyên",value=f"```{_fb_pd}```",  inline=True)
+        stam = int(_safe(p,"stamina",100)); smax = int(_safe(p,"stamina_max",100))
+        embed.add_field(name="🎭 Trạng Thái",
+            value=STATUS_TXT.get(status,status), inline=True)
+        embed.add_field(name="🔋 Thể Lực",
+            value=f"{bar_color(stam/smax if smax else 0)} `{stam}/{smax}`", inline=True)
+        if exp_cur >= exp_req > 0:
+            embed.add_field(name="",
+                value="✨ **Tu Vi đầy! Gõ `,tl dp` để đột phá!**", inline=False)
+        embed.set_footer(text="`,tl i` xem chỉ số chi tiết  •  Tu Tiên Bot v4")
+        await ctx.send(embed=embed)
+
+        STATUS_TXT = {
+            "idle":     "⚗ ĐANG RẢNH RỖI",
+            "beQuan":   f"🧘 BẾ QUAN {fmt_time(elapsed)}",
+            "thamHiem": f"⚔️ THÁM HIỂM {fmt_time(elapsed)}",
+            "pk":       "🥊 GIAO ĐẤU",
+            "luyen_dan":"⚗️ LUYỆN ĐAN",
+        }
+        stam = int(_safe(p, "stamina", 100))
+        smax = int(_safe(p, "stamina_max", 100))
+        lc   = _calc_luc_chien(p)  # Tính real-time
+
+        # ── Thử tạo ảnh Pillow ──────────────────────────────────
+        try:
+            from PIL import Image, ImageDraw, ImageFont, ImageFilter
+            import aiohttp, io, math, os
+
+            W, H = 600, 420
+
+            # ── Màu theo cảnh giới ──
+            from utils.embeds import REALM_COLORS
+            rc = REALM_COLORS[min(ri, len(REALM_COLORS)-1)]
+            r_col = ((rc >> 16) & 0xFF, (rc >> 8) & 0xFF, rc & 0xFF)
+
+            # ── Background galaxy swirl ──
+            bg = Image.new("RGBA", (W, H), (10, 5, 20, 255))
+            draw_bg = ImageDraw.Draw(bg)
+            cx, cy = W // 2, H // 2
+            import random as _rnd
+            _rnd.seed(ri * 7 + ord(p["name"][0]) if p.get("name") else ri)
+            # Stars
+            for _ in range(180):
+                sx = _rnd.randint(0, W)
+                sy = _rnd.randint(0, H)
+                sr = _rnd.randint(1, 3)
+                sa = _rnd.randint(80, 255)
+                draw_bg.ellipse([sx-sr, sy-sr, sx+sr, sy+sr],
+                    fill=(255, 255, 220, sa))
+            # Swirl glow
+            for i in range(300):
+                angle = i * 0.12 + ri * 0.5
+                radius = 30 + i * 0.7
+                sx = int(cx + radius * math.cos(angle))
+                sy = int(cy + radius * math.sin(angle) * 0.4)
+                if 0 <= sx < W and 0 <= sy < H:
+                    alpha = max(0, 120 - i // 3)
+                    gc = tuple(min(255, int(c * 0.6 + alpha * 0.4)) for c in r_col)
+                    draw_bg.ellipse([sx-2, sy-2, sx+2, sy+2],
+                        fill=(*gc, alpha))
+            bg = bg.filter(ImageFilter.GaussianBlur(1))
+
+            # ── Overlay panel ──
+            panel = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            pd = ImageDraw.Draw(panel)
+            # Main dark panel
+            pd.rounded_rectangle([10, 10, W-10, H-10],
+                radius=18, fill=(8, 4, 18, 210))
+            # Top accent bar
+            pd.rounded_rectangle([10, 10, W-10, 58],
+                radius=18, fill=(*r_col, 200))
+            # Separator line
+            pd.line([(20, 60), (W-20, 60)], fill=(*r_col, 120), width=1)
+            bg = Image.alpha_composite(bg, panel)
+
+            draw = ImageDraw.Draw(bg)
+
+            # ── Fonts ──
+            def load_font(size, bold=False):
+                paths = [
+                    f"/data/data/com.termux/files/usr/share/fonts/TTF/{'DejaVuSans-Bold' if bold else 'DejaVuSans'}.ttf",
+                    f"/system/fonts/{'NotoSans-Bold' if bold else 'NotoSans'}.ttf",
+                    "/data/data/com.termux/files/usr/share/fonts/TTF/DejaVuSans.ttf",
+                ]
+                for p_font in paths:
+                    if os.path.exists(p_font):
+                        try: return ImageFont.truetype(p_font, size)
+                        except: pass
+                return ImageFont.load_default()
+
+            f_title  = load_font(20, bold=True)
+            f_name   = load_font(22, bold=True)
+            f_realm  = load_font(14)
+            f_label  = load_font(11)
+            f_value  = load_font(13, bold=True)
+            f_small  = load_font(10)
+
+            # ── Avatar ──
+            avatar_img = None
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(str(ctx.author.display_avatar.url)) as resp:
+                        if resp.status == 200:
+                            av_data = await resp.read()
+                            av = Image.open(io.BytesIO(av_data)).convert("RGBA")
+                            av = av.resize((60, 60))
+                            # Circle mask
+                            mask = Image.new("L", (60, 60), 0)
+                            ImageDraw.Draw(mask).ellipse([0,0,59,59], fill=255)
+                            av.putalpha(mask)
+                            avatar_img = av
+            except Exception:
+                pass
+
+            # ── Header ──
+            draw.text((W//2, 34), "HỒ SƠ TU TIÊN",
+                font=f_title, fill=(255, 220, 50, 255), anchor="mm")
+
+            # Avatar
+            av_x, av_y = 28, 70
+            if avatar_img:
+                # Border circle
+                draw.ellipse([av_x-3, av_y-3, av_x+62, av_y+62],
+                    outline=r_col, width=2)
+                bg.paste(avatar_img, (av_x, av_y), avatar_img)
+            else:
+                draw.ellipse([av_x, av_y, av_x+58, av_y+58],
+                    fill=(40, 20, 60, 200), outline=r_col, width=2)
+
+            # Name & realm
+            name_str = p.get("name", "???")
+            draw.text((av_x+74, av_y+8), name_str,
+                font=f_name, fill=(255, 255, 255, 255))
+            _is_thiendao = p.get("dao","") == "thiendao"
+            realm_str = "Đạo Tổ" if _is_thiendao else get_realm_name(p)
+            draw.text((av_x+74, av_y+34), f"Cảnh Giới: {realm_str}",
+                font=f_realm, fill=(*r_col, 230))
+            dao_str = f"Đạo Tâm: {dao['name']}"
+            draw.text((av_x+74, av_y+52), dao_str,
+                font=f_small, fill=(180, 180, 220, 200))
+
+            # ── Stat boxes (2 cột × 3 hàng) ──
+            BOXES = [
+                ("⚡ LỰC CHIẾN",  "∞" if _is_thiendao else _s(lc)),
+                ("✨ LINH CĂN",   "Thiên Đạo Linh Căn" if _is_thiendao else _safe(p,"linh_can","?")),
+                ("💪 THỂ CHẤT",   "Thái Sơ Thiên Đạo Thể" if _is_thiendao else _safe(p,"the_chat","?")),
+                ("🩸 HUYẾT MẠCH", "Hỗn Độn Thần Ma Huyết" if _is_thiendao else _safe(p,"huyet_mach","?")),
+                ("🧠 NGỘ TÍNH",   _s(int(_safe(p,"ngo_tinh",50))*10000) if _is_thiendao else str(int(_safe(p,"ngo_tinh",50)))),
+                ("🍀 PHÚC DUYÊN", _s(int(_safe(p,"phuc_duyen",50))*10000) if _is_thiendao else str(int(_safe(p,"phuc_duyen",50)))),
+            ]
+            bx0, by0 = 20, 155
+            bw, bh   = 274, 44
+            gap      = 8
+
+            for i, (label, val) in enumerate(BOXES):
+                col = i % 2
+                row = i // 2
+                bx = bx0 + col * (bw + gap)
+                by = by0 + row * (bh + gap)
+                # Box bg
+                draw.rounded_rectangle([bx, by, bx+bw, by+bh],
+                    radius=8, fill=(20, 10, 40, 180))
+                draw.rounded_rectangle([bx, by, bx+bw, by+bh],
+                    radius=8, outline=(*r_col, 80), width=1)
+                draw.text((bx+10, by+6),  label, font=f_label, fill=(160, 160, 200, 220))
+                draw.text((bx+10, by+22), val,   font=f_value, fill=(255, 255, 255, 255))
+
+            # ── EXP bar ──
+            bar_y = 315
+            draw.text((20, bar_y - 18), "TIẾN ĐỘ ĐỘT PHÁ", font=f_label,
+                fill=(200, 200, 220, 200))
+            bw_full = W - 40
+            draw.rounded_rectangle([20, bar_y, 20+bw_full, bar_y+16],
+                radius=8, fill=(30, 15, 50, 200))
+            if exp_req > 0:
+                pct_exp = min(1.0, exp_cur / exp_req)
+                filled = int(bw_full * pct_exp)
+                if filled > 0:
+                    # Gradient: realm color → bright
+                    for xi in range(filled):
+                        t = xi / max(filled, 1)
+                        gc = tuple(min(255, int(c + (255-c)*t*0.3)) for c in r_col)
+                        draw.line([(20+xi, bar_y+2), (20+xi, bar_y+14)], fill=(*gc, 255))
+                exp_txt = f"{fmt(exp_cur)} / {fmt(exp_req)}  ({pct_exp*100:.1f}%)"
+            else:
+                exp_txt = "MAX"
+            draw.text((W//2, bar_y+8), exp_txt,
+                font=f_small, fill=(255,255,255,200), anchor="mm")
+
+            # ── Status + Thể lực ──
+            st_y = 342
+            status_str = STATUS_TXT.get(status, status)
+            draw.text((W//2, st_y + 10), "TRẠNG THÁI HIỆN TẠI",
+                font=f_label, fill=(160, 160, 200, 180), anchor="mm")
+            draw.text((W//2, st_y + 24), status_str,
+                font=f_value, fill=(*r_col, 255), anchor="mm")
+            tl_str = f"⚡ Thể Lực: {stam} / {smax}"
+            draw.text((W//2, st_y + 42), tl_str,
+                font=f_small, fill=(180, 220, 180, 220), anchor="mm")
+
+            # ── Footer ──
+            draw.text((W//2, H-14), "Tu Tiên Bot v4  •  ,tl i để xem chỉ số chi tiết",
+                font=f_small, fill=(100, 100, 130, 160), anchor="mm")
+
+            # ── Xuất ảnh ──
+            out = io.BytesIO()
+            bg.convert("RGB").save(out, format="PNG", optimize=True)
+            out.seek(0)
+
+            # Gửi ảnh + embed nhỏ
+            file = discord.File(out, filename="profile.png")
+            embed = discord.Embed(color=rc)
+            embed.set_image(url="attachment://profile.png")
+            if exp_cur >= exp_req > 0:
+                embed.add_field(name="", value="✨ **Tu Vi đầy! Gõ `,tl dp` để đột phá!**", inline=False)
+            embed.set_footer(text="`,tl i` xem chỉ số chi tiết  •  Tu Tiên Bot v4")
+
+            # Buttons
+            view = discord.ui.View(timeout=120)
+            view.add_item(discord.ui.Button(label="🧘 Bế Quan",  style=discord.ButtonStyle.success,  custom_id="beQuan"))
+            view.add_item(discord.ui.Button(label="🎒 Túi Đồ",   style=discord.ButtonStyle.primary,   custom_id="tuido"))
+            view.add_item(discord.ui.Button(label="🗺️ Bí Cảnh",  style=discord.ButtonStyle.primary,   custom_id="bicanh"))
+            view.add_item(discord.ui.Button(label="🚀 Đột Phá",  style=discord.ButtonStyle.secondary, custom_id="dotpha",
+                disabled=(exp_cur < exp_req)))
+            view.add_item(discord.ui.Button(label="📖 Hướng Dẫn",style=discord.ButtonStyle.secondary, custom_id="help"))
+
+            msg = await ctx.send(file=file, embed=embed, view=view)
+
+            # Sinh ảnh AI theo Đạo
+            try:
+                import aiohttp as _aio, io as _io
+                _dao_key = p.get("dao", "nhapdao")
+                async with _aio.ClientSession() as _sess:
+                    _ai_bytes = await _fetch_pollinations(_sess, _dao_key)
+                if _ai_bytes:
+                    _dao_info = DAO.get(_dao_key, {"name": "Tu Tiên", "icon": "✨"})
+                    _ai_file = discord.File(_io.BytesIO(_ai_bytes), filename="dao_art.png")
+                    _ai_embed = discord.Embed(
+                        description=f"{_dao_info['icon']} **{_dao_info['name']}** — Hình tượng tu luyện của **{p['name']}**",
+                        color=rc
+                    )
+                    _ai_embed.set_image(url="attachment://dao_art.png")
+                    _ai_embed.set_footer(text="🎨 Sinh bởi Pollinations.ai")
+                    await ctx.send(file=_ai_file, embed=_ai_embed)
+            except Exception:
+                pass
+
+            # Handle button interactions
+            async def button_cb(interaction: discord.Interaction):
+                if interaction.user.id != ctx.author.id:
+                    await interaction.response.send_message("❌ Không phải lượt của bạn!", ephemeral=True)
+                    return
+                cid = interaction.data["custom_id"]
+                await interaction.response.defer()
+                CMD_MAP = {
+                    "beQuan": "start", "tuido": "bag",
+                    "bicanh": "bicanh", "dotpha": "dp", "help": "help"
+                }
+                cmd = self.bot.get_command(CMD_MAP.get(cid, ""))
+                if cmd:
+                    await ctx.invoke(cmd)
+
+            view.on_error = lambda i, e, item: None
+            for item in view.children:
+                item.callback = button_cb
+
+            return
+
+        except Exception as _pil_err:
+            import traceback; traceback.print_exc()
+            # Fallback: embed text nếu PIL lỗi
+            pass
+
+        # ── FALLBACK embed text ────────────────────────────────
+        embed = discord.Embed(color=realm_color(ri))
+        embed.set_author(name=f"{realm_icon(ri)}  {p['name']}",
+            icon_url=ctx.author.display_avatar.url)
+        _is_td2 = p.get("dao","") == "thiendao"
+        embed.add_field(name="🌌 Cảnh Giới",      value=f"```{'Đạo Tổ' if _is_td2 else get_realm_name(p)}```",              inline=True)
+        embed.add_field(name=f"{dao['icon']} Đạo", value=f"```{dao['name']}```",                    inline=True)
+        embed.add_field(name="🆔 Passport",        value=f"```{_safe(p,'passport','???')}```",      inline=True)
+        embed.add_field(name="⚡ Tiến Độ",
+            value=f"{bar(exp_cur, exp_req, 20)}\n`{fmt(exp_cur)}` / `{fmt(exp_req)}`", inline=False)
+        embed.add_field(name="⚔️ Lực Chiến",  value=f"```{"∞" if _is_td2 else _s(lc)}```",                              inline=True)
+        embed.add_field(name="✨ Linh Căn",   value=f"```{'Thiên Đạo Linh Căn' if _is_td2 else _safe(p,'linh_can','?')}```",             inline=True)
+        embed.add_field(name="💪 Thể Chất",   value=f"```{'Thái Sơ Thiên Đạo Thể' if _is_td2 else _safe(p,'the_chat','?')}```",             inline=True)
+        embed.add_field(name="🩸 Huyết Mạch", value=f"```{'Hỗn Độn Thần Ma Huyết' if _is_td2 else _safe(p,'huyet_mach','?')}```",          inline=True)
+        embed.add_field(name="🧠 Ngộ Tính",   value=f"```{_s(int(_safe(p,'ngo_tinh',50))*10000) if _is_td2 else int(_safe(p,'ngo_tinh',50))}```",         inline=True)
+        embed.add_field(name="🍀 Phúc Duyên", value=f"```{_s(int(_safe(p,'phuc_duyen',50))*10000) if _is_td2 else int(_safe(p,'phuc_duyen',50))}```",       inline=True)
+        embed.add_field(name="🎭 Trạng Thái", value=STATUS_TXT.get(status, status),                inline=True)
+        embed.add_field(name="🔋 Thể Lực",    value=f"{bar_color(stam/smax if smax else 0)} `{stam}/{smax}`", inline=True)
+        if exp_cur >= exp_req > 0:
+            embed.add_field(name="", value="✨ **Tu Vi đầy! Gõ `,tl dp` để đột phá!**", inline=False)
+        embed.set_footer(text="`,tl i` xem chỉ số chi tiết  •  Tu Tiên Bot v4")
+
+    # ── CHỈ SỐ (,tl i) ─────────────────────────────────────────────
+    async def _stats(self, ctx, p):
+        if not p:
+            await ctx.send(embed=discord.Embed(
+                description="❌ Đạo hữu chưa nhập môn! Dùng `,tl start` để bắt đầu.",
+                color=0xF44336
+            ))
+            return
+        try:
+            equip   = await self.bot.db.get_equipment(ctx.author.id)
+            linhthu = await self.bot.db.get_linhthu(ctx.author.id)
+            ri      = int(_safe(p, "realm_index", 0))
+
+            # Tính bonus trang bị
+            eq_atk = eq_def = eq_hp = eq_spd = 0.0
+            SLOTS = [
+                ("weapon",  "⚔️",  "Vũ Khí"),
+                ("armor",   "🛡️",  "Giáp Phục"),
+                ("phapbao", "🔮",  "Pháp Bảo"),
+                ("hat",     "🪖",  "Mũ"),
+                ("necklace","📿",  "Vòng Cổ"),
+                ("gloves",  "🧤",  "Găng Tay"),
+                ("boots",   "👟",  "Giày"),
+            ]
+            eq_lines = []
+            for slot, em, sname in SLOTS:
+                if slot in equip:
+                    e   = equip[slot]
+                    itm = ITEMS.get(e["item_id"], {})
+                    m   = 1 + e["enhance"] * 0.05
+                    # Hỗ trợ cả key cũ (base_atk) và mới (atk)
+                    eq_atk += float(itm.get("base_atk", itm.get("atk", 0))) * m
+                    eq_def += float(itm.get("base_def", itm.get("def_", 0))) * m
+                    eq_hp  += float(itm.get("base_hp",  itm.get("hp",  0))) * m
+                    eq_spd += float(itm.get("base_spd", itm.get("spd", 0))) * m
+                    enh_str = f"+{e['enhance']}" if e['enhance'] else ""
+                    eq_lines.append(f"{em} **{sname}:** {itm.get('name', e['item_id'])[:14]}{' `'+enh_str+'`' if enh_str else ''}")
+                else:
+                    eq_lines.append(f"{em} **{sname}:** _(trống)_")
+
+            # Chỉ số cơ bản
+            b_atk = float(_safe(p, "atk",    100))
+            b_def = float(_safe(p, "def_",    50))
+            b_hp  = float(_safe(p, "hp_max", 1000))
+            spd   = float(_safe(p, "spd",     50))  + eq_spd
+            crit  = float(_safe(p, "crit",    5.0))
+            luck  = int(_safe(p,   "luck",    0))
+            stam  = int(_safe(p, "stamina",   100))
+            smax  = int(_safe(p, "stamina_max",100))
+
+            # Cộng buff từ bi_kíp / đan dược (bảng buffs)
+            bf_atk_pct = bf_def_pct = bf_hp_pct = bf_spd_pct = bf_crit = 0.0
+            try:
+                _now_ts = now()
+                _buffs_rows = await self.bot.db.fetchall(
+                    "SELECT buff_type, value FROM buffs WHERE user_id=? AND expires_at > ?",
+                    (str(ctx.author.id), _now_ts)
+                )
+                for _br in _buffs_rows:
+                    _bt, _bv = _br["buff_type"], float(_br["value"])
+                    if _bt == "atk":       bf_atk_pct += _bv
+                    elif _bt == "def":     bf_def_pct += _bv
+                    elif _bt == "hp":      bf_hp_pct  += _bv
+                    elif _bt == "hp_max":  bf_hp_pct  += _bv
+                    elif _bt == "spd":     bf_spd_pct += _bv
+                    elif _bt == "crit_pct": bf_crit   += _bv
+            except Exception:
+                pass
+
+            f_atk = (b_atk + eq_atk) * (1 + bf_atk_pct / 100)
+            f_def = (b_def + eq_def) * (1 + bf_def_pct / 100)
+            f_hp  = (b_hp  + eq_hp)  * (1 + bf_hp_pct  / 100)
+            spd   = spd * (1 + bf_spd_pct / 100)
+            crit  = min(crit + bf_crit, 100.0)
+
+            # Tính lực chiến
+            lc = _calc_luc_chien(p, eq_atk, eq_def, eq_hp)
+
+            # Hiệu ứng buff đang active
+            status     = _safe(p, "status", "idle")
+            status_start = int(_safe(p, "status_start", 0))
+            elapsed    = now() - status_start if status_start else 0
+            STATUS_MAP = {
+                "idle":     "😴 Nhàn Rỗi",
+                "beQuan":   f"🧘 Bế Quan ({fmt_time(elapsed)})",
+                "thamHiem": f"⚔️ Thám Hiểm ({fmt_time(elapsed)})",
+                "pk":       "🥊 Giao Đấu",
+                "luyen_dan":"⚗️ Luyện Đan",
+            }
+            tinh_trang = STATUS_MAP.get(status, status)
+
+            # Tông môn
+            tm_id  = _safe(p, "tong_mon_id")
+            tm_val = "_(chưa gia nhập)_"
+            if tm_id:
+                tm = await self.bot.db.fetchone("SELECT name, level FROM tong_mon WHERE id=?", (tm_id,))
+                tm_val = f"⛩️ **{tm['name']}** Lv.{_safe(tm,'level',1)}" if tm else "_(đã giải tán)_"
+
+            dao_info = DAO.get(p.get("dao", ""), {"name": "Chưa Chọn", "icon": "❓"})
+            _is_td     = p.get("dao","") == "thiendao"
+            realm_show = "Đạo Tổ" if _is_td else get_realm_name(p)
+
+            # ── Buff đang active ──
+            _now = now()
+            active_buffs = []
+            try:
+                buffs_raw = await self.bot.db.fetchall(
+                    "SELECT buff_type, value, expires_at FROM buffs WHERE user_id=? AND expires_at > ?",
+                    (str(ctx.author.id), _now)
+                )
+                BUFF_LABEL = {
+                    "exp_rate":       ("⚡", "EXP x{v}"),
+                    "atk":            ("⚔️", "ATK +{v}%"),
+                    "def":            ("🛡️", "DEF +{v}%"),
+                    "spd":            ("💨", "SPD +{v}%"),
+                    "hp":             ("❤️", "HP +{v}%"),
+                    "luck":           ("🍀", "Vận +{v}"),
+                    "breakthrough":   ("🚀", "ĐP +{v}%"),
+                    "drop_rate":      ("🎁", "Drop +{v}%"),
+                    "explore_speed":  ("🗺️", "Thám x{v}"),
+                    "boss_attract":   ("👹", "Hút Boss"),
+                    "dmg_reduce":     ("🔰", "Giảm dmg {v}%"),
+                    "dmg_cap":        ("🛡️", "Cap dmg {v}%"),
+                    "min_dmg":        ("💥", "MinDmg {v}%"),
+                    "boss_scale":     ("⬇️", "Boss -50%"),
+                    "gamble_bonus":   ("🎲", "Cược +{v}%"),
+                    "hp_max":         ("❤️", "HP Tối Đa +{v}%"),
+                    "spd_penalty":    ("💨", "SPD -{v}%"),
+                    "def_penalty":    ("🛡️", "DEF -{v}%"),
+                    "risk_reduce":    ("🧘", "Giảm rủi ro {v}%"),
+                    "cultivate_time": ("⏰", "Giới hạn tu luyện +{v}s"),
+                    "gamble_refund":  ("🎲", "Hoàn cược {v}%"),
+                    "tau_hoa_reduce": ("🩹", "Giảm thời gian thương {v}%"),
+                }
+                for b in buffs_raw:
+                    bt = b["buff_type"]
+                    bv = b["value"]
+                    rem = b["expires_at"] - _now
+                    icon, label_tpl = BUFF_LABEL.get(bt, ("✨", bt))
+                    label = label_tpl.format(v=bv)
+                    active_buffs.append(f"{icon} {label} `({fmt_time(rem)})`")
+            except Exception:
+                pass
+
+            hieu_ung_str = "\n".join(active_buffs) if active_buffs else "_Không có buff_"
+
+            # ═══ BUILD EMBED ═══
+            embed = discord.Embed(
+                title="📊 CHỈ SỐ TIÊN NHÂN 📊",
+                color=realm_color(ri)
+            )
+            embed.set_author(
+                name=f"{realm_icon(ri)} {p['name']}",
+                icon_url=ctx.author.display_avatar.url
+            )
+
+            # ── Thông tin cơ bản ──
+            _prestige = int(_safe(p, "prestige", 0))
+            _prestige_line = ""
+            if _prestige > 0:
+                _ptitle = get_prestige_title(_prestige)
+                _pmult = prestige_exp_mult(_prestige)
+                _prestige_line = f"\n🔄 **Chuyển Sinh:** `{_prestige}` lần{' — ' + _ptitle if _ptitle else ''} (x{_pmult} tu luyện)"
+            embed.add_field(
+                name="📋 THÔNG TIN",
+                value=(
+                    f"👤 **Đạo hữu:** {p['name']}\n"
+                    f"🏥 **Tình Trạng:** {tinh_trang}\n"
+                    f"{dao_info['icon']} **Đạo:** {dao_info['name']}\n"
+                    f"🛡️ **Tông Môn:** {tm_val}\n"
+                    f"🔋 **Thể Lực:** `{stam}/{smax}`"
+                    f"{_prestige_line}"
+                ),
+                inline=False
+            )
+
+            # ── Buff active ──
+            embed.add_field(
+                name="🔥 HIỆU ỨNG ĐAN DƯỢC",
+                value=hieu_ung_str,
+                inline=False
+            )
+
+            # ── Tài sản ──
+            ha    = int(_safe(p, "linh_thach_ha",    0))
+            trung = int(_safe(p, "linh_thach_trung", 0))
+            cuc   = int(_safe(p, "linh_thach_cuc",   0))
+            embed.add_field(
+                name="💰 TÀI SẢN",
+                value=(
+                    f"👑 **Cực Phẩm LT:** `{_sci(cuc)}`\n"
+                    f"💎 **Trung Phẩm LT:** `{_sci(trung)}`\n"
+                    f"💰 **Hạ Phẩm LT:** `{_sci(ha)}`"
+                ),
+                inline=True
+            )
+
+            # ── Chỉ số chiến đấu (nhân 10000 nếu Thiên Đạo) ──
+            _m = 10000 if _is_td else 1
+            atk_show = f_atk * _m
+            def_show = f_def * _m
+            hp_show  = f_hp  * _m
+            spd_show = spd   * _m
+            ngo_show = int(_safe(p,"ngo_tinh",50))   * _m
+            pd_show  = int(_safe(p,"phuc_duyen",50)) * _m
+            # Cộng eq bonus vào hiển thị
+            atk_str = f"`{_sci(atk_show)}`" + (f" _(eq+{_sci(eq_atk*_m)})_" if eq_atk else "")
+            def_str = f"`{_sci(def_show)}`" + (f" _(eq+{_sci(eq_def*_m)})_" if eq_def else "")
+            hp_str  = f"`{_sci(hp_show)}`"  + (f" _(eq+{_sci(eq_hp *_m)})_" if eq_hp  else "")
+            spd_str = f"`{_sci(spd_show)}`" + (f" _(eq+{_sci(eq_spd*_m)})_" if eq_spd else "")
+            linh_can_show   = "Thiên Đạo Linh Căn"    if _is_td else _safe(p,"linh_can","?")
+            the_chat_show   = "Thái Sơ Thiên Đạo Thể" if _is_td else _safe(p,"the_chat","?")
+            huyet_mach_show = "Hỗn Độn Thần Ma Huyết" if _is_td else _safe(p,"huyet_mach","?")
+            # Thiên Đạo: LUCK max, CRIT 100%
+            luck_show = 99999 * _m if _is_td else luck * _m
+            crit_show = 100.0       if _is_td else crit
+            lc_str    = _sci(1e60)  if _is_td else _sci(lc)
+            embed.add_field(
+                name="⚔️ CHIẾN LỰC",
+                value=(
+                    f"🗡️ **Sức Mạnh:** {atk_str}\n"
+                    f"🛡️ **Phòng Thủ:** {def_str}\n"
+                    f"❤️ **Sinh Lực:** {hp_str}\n"
+                    f"⚡ **Tốc Độ:** {spd_str}\n"
+                    f"🍀 **Vận Khí:** `{_sci(luck_show)}`\n"
+                    f"💥 **Bạo Kích:** `{crit_show:.1f}%`\n"
+                    f"⚡ **Lực Chiến:** `{lc_str}`"
+                ),
+                inline=True
+            )
+
+            # ── Trang bị ──
+            embed.add_field(
+                name="🛡️ TRANG BỊ",
+                value="\n".join(eq_lines),
+                inline=False
+            )
+
+            # ── Tư chất: lấy bonus từ game_data ──
+            from utils.game_data import LINH_CAN, THE_CHAT, HUYET_MACH
+            _RARITY_LABEL = {
+                "trash":       "⬜ Phế Phẩm",
+                "common":      "⬜ Phàm Phẩm",
+                "uncommon":    "🟢 Hạ Phẩm",
+                "rare":        "🔵 Trung Phẩm",
+                "epic":        "🟣 Thượng Phẩm",
+                "legendary":   "🟡 Địa Phẩm",
+                "mythic":      "🔴 Thiên Phẩm",
+                "divine":      "🟠 Thánh Phẩm",
+                "transcendent":"✨ Vô Thượng",
+            }
+            def _stat_bonus_str(entry: dict) -> str:
+                parts = []
+                if entry.get("exp_rate", 1.0) != 1.0:
+                    parts.append(f"EXP x{entry['exp_rate']:.2f}")
+                if entry.get("atk", 1.0) != 1.0:
+                    v = entry["atk"]
+                    parts.append(f"ATK {'x' if v >= 2 else '+'}{v if v >= 2 else f'{int((v-1)*100)}%'}")
+                if entry.get("def", 1.0) != 1.0:
+                    v = entry["def"]
+                    parts.append(f"DEF +{int((v-1)*100)}%")
+                if entry.get("hp", 1.0) != 1.0:
+                    v = entry["hp"]
+                    parts.append(f"HP {'x' if v >= 2 else '+'}{v if v >= 2 else f'{int((v-1)*100)}%'}")
+                if entry.get("spd", 1.0) != 1.0:
+                    v = entry["spd"]
+                    parts.append(f"SPD +{int((v-1)*100)}%")
+                if entry.get("crit", 0):
+                    parts.append(f"Crit +{entry['crit']}")
+                if entry.get("crit_resist", 0):
+                    parts.append(f"KCrit +{entry['crit_resist']}")
+                if entry.get("dodge", 0):
+                    parts.append(f"Né +{entry['dodge']}%")
+                if entry.get("luck", 0):
+                    parts.append(f"Luck +{entry['luck']}")
+                return "  |  ".join(parts) if parts else "Không có bonus"
+
+            _lc_entry = next((e for e in LINH_CAN if e["name"] == linh_can_show), {})
+            _tc_entry = next((e for e in THE_CHAT if e["name"] == the_chat_show), {})
+            _hm_entry = next((e for e in HUYET_MACH if e["name"] == huyet_mach_show), {})
+            _lc_rarity = _RARITY_LABEL.get(_lc_entry.get("rarity",""), "")
+            _tc_rarity = _RARITY_LABEL.get(_tc_entry.get("rarity",""), "")
+            _hm_rarity = _RARITY_LABEL.get(_hm_entry.get("rarity",""), "")
+            _lc_bonus  = _stat_bonus_str(_lc_entry) if _lc_entry else ""
+            _tc_bonus  = _stat_bonus_str(_tc_entry) if _tc_entry else ""
+            _hm_bonus  = _stat_bonus_str(_hm_entry) if _hm_entry else ""
+
+            # Cảnh giới đầy đủ: tên + tầng + progress
+            from utils.game_data import REALMS
+            _ri  = int(_safe(p, "realm_index", 0))
+            _rt  = int(_safe(p, "realm_tier",  1))
+            _rmax = REALMS[_ri]["tiers"] if _ri < len(REALMS) else 1
+            _realm_full = realm_show
+            if not _is_td and _rmax > 1:
+                _realm_full = f"{realm_show} [{_rt}/{_rmax}]"
+
+            embed.add_field(
+                name="🌟 TƯ CHẤT",
+                value=(
+                    f"✨ **Linh Căn:** {linh_can_show}\n"
+                    f"💪 **Thể Chất:** {the_chat_show}\n"
+                    f"🩸 **Huyết Mạch:** {huyet_mach_show}"
+                ),
+                inline=False
+            )
+
+
+
+            embed.set_footer(text="Tu Tiên Bot v4  •  ,tl status — hồ sơ  •  ,tl trangbi — trang bị")
+
+            # Thêm ảnh Pollinations làm thumbnail
+            try:
+                import aiohttp as _aio, io as _io
+                _dao_key = p.get("dao", "nhapdao")
+                async with _aio.ClientSession() as _sess:
+                    _ai_bytes = await _fetch_pollinations(_sess, _dao_key)
+                if _ai_bytes:
+                    _ai_file = discord.File(_io.BytesIO(_ai_bytes), filename="dao_art.png")
+                    _dao_info = DAO.get(_dao_key, {"name": "Tu Tiên", "icon": "✨"})
+                    embed.set_thumbnail(url="attachment://dao_art.png")
+                    await ctx.send(file=_ai_file, embed=embed)
+                else:
+                    await ctx.send(embed=embed)
+            except Exception:
+                await ctx.send(embed=embed)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            await ctx.send(embed=warn(f"⚠️ Lỗi hiển thị chỉ số!\n`{type(e).__name__}: {e}`"))
+
+async def setup(bot):
+    await bot.add_cog(Profile(bot))
